@@ -1,0 +1,23 @@
+{
+  "name": "obsidian-file-title-sync",
+  "version": "0.1.0",
+  "description": "Sync Obsidian note titles across filename, first H1, and title frontmatter.",
+  "main": "main.js",
+  "scripts": {
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs",
+    "dev": "node esbuild.config.mjs --watch"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "builtin-modules": "^5.1.0",
+    "esbuild": "^0.28.0",
+    "obsidian": "^1.12.3",
+    "typescript": "^6.0.2"
+  }
+}

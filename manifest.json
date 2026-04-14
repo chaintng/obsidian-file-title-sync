@@ -1,0 +1,10 @@
+{
+  "id": "file-title-sync",
+  "name": "File Title Sync",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Sync note titles across filename, first H1, and title frontmatter on save.",
+  "author": "",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}

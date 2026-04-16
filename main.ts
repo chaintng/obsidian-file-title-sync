@@ -1,6 +1,6 @@
 import { App, normalizePath, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile } from "obsidian";
 
-const URL_UNSAFE_FILENAME_CHARS = /[^\p{Letter}\p{Number}]+/gu;
+const URL_UNSAFE_FILENAME_CHARS = /[^\p{Letter}\p{Mark}\p{Number}]+/gu;
 const MULTIPLE_DASHES = /-{2,}/g;
 const H1_PATTERN = /^#(?!#)\s+(.+?)\s*#*\s*$/;
 const INLINE_TAG_PATTERN = /(^|\s)#([A-Za-z0-9_/-]+)/g;
@@ -282,7 +282,7 @@ function normalizeTitle(title: string): string {
 
 function toSafeFileBaseName(title: string): string {
 	const safeBaseName = title
-		.normalize("NFKC")
+		.normalize("NFC")
 		.toLowerCase()
 		.trim()
 		.replace(URL_UNSAFE_FILENAME_CHARS, "-")

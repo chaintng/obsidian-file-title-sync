@@ -13,17 +13,22 @@ const MULTIPLE_DASHES = /-{2,}/g;
 const EDGE_DASHES = /^-+|-+$/g;
 const H1_PATTERN = /^#(?!#)\s+(.+?)\s*#*\s*$/;
 const INLINE_TAG_PATTERN = /(^|\s)#([A-Za-z0-9_/-]+)/g;
+const EDITOR_CHANGE_SYNC_DELAY_MS = 1_000;
 
 type TitleSource = "heading" | "frontmatter" | "filename";
 
 interface FileTitleSyncSettings {
+  enabled: boolean;
   titleSource: TitleSource;
+  onlyFolders: string[];
   excludedFolders: string[];
   excludedTags: string[];
 }
 
 const DEFAULT_SETTINGS: FileTitleSyncSettings = {
+  enabled: true,
   titleSource: "heading",
+  onlyFolders: [],
   excludedFolders: [],
   excludedTags: [],
 };
@@ -46,6 +51,7 @@ interface HeadingMatch {
 
 export default class FileTitleSyncPlugin extends Plugin {
   private readonly syncingPaths = new Set<string>();
+  private readonly pendingSyncTimers = new Map<string, number>();
   settings: FileTitleSyncSettings = DEFAULT_SETTINGS;
 
   async onload(): Promise<void> {
@@ -54,13 +60,22 @@ export default class FileTitleSyncPlugin extends Plugin {
 
     this.app.workspace.onLayoutReady(() => {
       this.registerEvent(
-        this.app.vault.on("modify", (file) => {
-          if (this.isMarkdownFile(file)) {
-            void this.syncFile(file);
+        this.app.workspace.on("editor-change", (_editor, info) => {
+          const file = info.file;
+
+          if (file !== null) {
+            this.scheduleSyncFile(file);
           }
         }),
       );
     });
+  }
+
+  onunload(): void {
+    this.pendingSyncTimers.forEach((timerId) => {
+      window.clearTimeout(timerId);
+    });
+    this.pendingSyncTimers.clear();
   }
 
   async loadSettings(): Promise<void> {
@@ -69,6 +84,9 @@ export default class FileTitleSyncPlugin extends Plugin {
     this.settings = {
       ...DEFAULT_SETTINGS,
       ...storedSettings,
+      onlyFolders: cleanList(
+        storedSettings?.onlyFolders ?? DEFAULT_SETTINGS.onlyFolders,
+      ),
       excludedFolders: cleanList(
         storedSettings?.excludedFolders ?? DEFAULT_SETTINGS.excludedFolders,
       ),
@@ -86,10 +104,46 @@ export default class FileTitleSyncPlugin extends Plugin {
     return file instanceof TFile && file.extension === "md";
   }
 
+  private isActiveFile(file: TFile): boolean {
+    const activeFile = this.app.workspace.getActiveFile();
+    return (
+      activeFile !== null &&
+      normalizePath(activeFile.path) === normalizePath(file.path)
+    );
+  }
+
+  private scheduleSyncFile(file: TFile): void {
+    if (
+      !this.settings.enabled ||
+      !this.isMarkdownFile(file) ||
+      !this.isActiveFile(file)
+    ) {
+      return;
+    }
+
+    const existingTimerId = this.pendingSyncTimers.get(file.path);
+    if (existingTimerId !== undefined) {
+      window.clearTimeout(existingTimerId);
+    }
+
+    const timerId = window.setTimeout(() => {
+      this.pendingSyncTimers.delete(file.path);
+      void this.syncFile(file);
+    }, EDITOR_CHANGE_SYNC_DELAY_MS);
+
+    this.pendingSyncTimers.set(file.path, timerId);
+  }
+
   private async syncFile(file: TFile): Promise<void> {
     const originalPath = file.path;
 
-    if (this.syncingPaths.has(originalPath) || this.isExcludedFolder(file)) {
+    if (
+      !this.settings.enabled ||
+      !this.isActiveFile(file) ||
+      this.syncingPaths.has(originalPath) ||
+      !this.isAllowedFolder(file) ||
+      this.isExcludedFolder(file)
+    ) {
       return;
     }
 
@@ -175,6 +229,10 @@ export default class FileTitleSyncPlugin extends Plugin {
   }
 
   private async renameFileIfNeeded(file: TFile, title: string): Promise<void> {
+    if (!this.isActiveFile(file)) {
+      return;
+    }
+
     const safeBaseName = toSafeFileBaseName(title);
     const targetPath = await this.getAvailablePath(file, safeBaseName);
 
@@ -217,6 +275,16 @@ export default class FileTitleSyncPlugin extends Plugin {
     );
   }
 
+  private isAllowedFolder(file: TFile): boolean {
+    if (this.settings.onlyFolders.length === 0) {
+      return true;
+    }
+
+    return this.settings.onlyFolders.some((folder) =>
+      isPathInFolder(file.path, folder),
+    );
+  }
+
   private hasExcludedTag(content: string): boolean {
     if (this.settings.excludedTags.length === 0) {
       return false;
@@ -242,6 +310,18 @@ class FileTitleSyncSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     new Setting(containerEl)
+      .setName("Enable title sync")
+      .setDesc("When disabled, the plugin will not sync headings, frontmatter, or filenames.")
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.enabled)
+          .onChange(async (value) => {
+            this.plugin.settings.enabled = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
       .setName("Source of truth")
       .setDesc(
         "When titles mismatch, this value wins. If it is missing, the plugin falls back to the other title locations.",
@@ -255,6 +335,21 @@ class FileTitleSyncSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.titleSource)
           .onChange(async (value) => {
             this.plugin.settings.titleSource = toTitleSource(value);
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Only folders")
+      .setDesc(
+        "One folder path per line. When set, only notes inside these folders are synced.",
+      )
+      .addTextArea((text) => {
+        text
+          .setPlaceholder("Writing\nPublished")
+          .setValue(this.plugin.settings.onlyFolders.join("\n"))
+          .onChange(async (value) => {
+            this.plugin.settings.onlyFolders = cleanList(value.split("\n"));
             await this.plugin.saveSettings();
           });
       });

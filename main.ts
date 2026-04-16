@@ -1,7 +1,6 @@
 import { App, normalizePath, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile } from "obsidian";
 
-const UNSUPPORTED_FILENAME_CHARS = /[\\/:*?"<>|#[\]^]/g;
-const CONTROL_CHARS = /[\u0000-\u001f\u007f]/g;
+const URL_UNSAFE_FILENAME_CHARS = /[^\p{Letter}\p{Number}]+/gu;
 const MULTIPLE_DASHES = /-{2,}/g;
 const H1_PATTERN = /^#(?!#)\s+(.+?)\s*#*\s*$/;
 const INLINE_TAG_PATTERN = /(^|\s)#([A-Za-z0-9_/-]+)/g;
@@ -282,14 +281,15 @@ function normalizeTitle(title: string): string {
 }
 
 function toSafeFileBaseName(title: string): string {
-	const withoutUnsupportedChars = title
-		.replace(CONTROL_CHARS, "-")
-		.replace(UNSUPPORTED_FILENAME_CHARS, "-")
+	const safeBaseName = title
+		.normalize("NFKC")
+		.toLowerCase()
 		.trim()
+		.replace(URL_UNSAFE_FILENAME_CHARS, "-")
 		.replace(MULTIPLE_DASHES, "-")
-		.replace(/^[.\s-]+|[.\s-]+$/g, "");
+		.replace(/^-+|-+$/g, "");
 
-	return withoutUnsupportedChars.length > 0 ? withoutUnsupportedChars : "Untitled";
+	return safeBaseName.length > 0 ? safeBaseName : "untitled";
 }
 
 function findFirstH1(lines: string[]): HeadingMatch | null {

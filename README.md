@@ -8,7 +8,7 @@ Syncs an Obsidian note title across:
 
 The sync runs when a Markdown file is modified. The first H1 is the source of truth when present, then `title` frontmatter, then the current filename.
 
-Unsupported filename characters are replaced with `-`.
+Filenames are lowercased and converted to web URL-safe slugs by replacing special characters with `-`.
 
 When frontmatter exists, the plugin keeps one blank line between the closing frontmatter marker and the note body or H1.
 

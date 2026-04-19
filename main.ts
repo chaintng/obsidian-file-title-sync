@@ -1,5 +1,6 @@
 import {
   App,
+  Notice,
   normalizePath,
   Plugin,
   PluginSettingTab,
@@ -14,6 +15,7 @@ const EDGE_DASHES = /^-+|-+$/g;
 const H1_PATTERN = /^#(?!#)\s+(.+?)\s*#*\s*$/;
 const INLINE_TAG_PATTERN = /(^|\s)#([A-Za-z0-9_/-]+)/g;
 const EDITOR_CHANGE_SYNC_DELAY_MS = 1_000;
+const MAX_ENCODED_FILE_BASENAME_LENGTH = 180;
 
 type TitleSource = "heading" | "frontmatter" | "filename";
 
@@ -49,6 +51,10 @@ interface HeadingMatch {
   title: string;
 }
 
+interface SyncFileOptions {
+  requireActiveFile: boolean;
+}
+
 export default class FileTitleSyncPlugin extends Plugin {
   private readonly syncingPaths = new Set<string>();
   private readonly pendingSyncTimers = new Map<string, number>();
@@ -57,6 +63,13 @@ export default class FileTitleSyncPlugin extends Plugin {
   async onload(): Promise<void> {
     await this.loadSettings();
     this.addSettingTab(new FileTitleSyncSettingTab(this.app, this));
+    this.addCommand({
+      id: "resync-all-file-titles",
+      name: "Resync all file titles",
+      callback: () => {
+        void this.resyncAllFiles();
+      },
+    });
 
     this.app.workspace.onLayoutReady(() => {
       this.registerEvent(
@@ -100,7 +113,7 @@ export default class FileTitleSyncPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
-  private isMarkdownFile(file: TAbstractFile): file is TFile {
+  private isMarkdownFile(file: TAbstractFile | null): file is TFile {
     return file instanceof TFile && file.extension === "md";
   }
 
@@ -134,17 +147,49 @@ export default class FileTitleSyncPlugin extends Plugin {
     this.pendingSyncTimers.set(file.path, timerId);
   }
 
-  private async syncFile(file: TFile): Promise<void> {
+  private async resyncAllFiles(): Promise<void> {
+    if (!this.settings.enabled) {
+      new Notice("File Title Sync is disabled.");
+      return;
+    }
+
+    const files = this.app.vault.getMarkdownFiles();
+    let syncedCount = 0;
+
+    for (const file of files) {
+      const currentFile = this.app.vault.getAbstractFileByPath(file.path);
+
+      if (!this.isMarkdownFile(currentFile)) {
+        continue;
+      }
+
+      const didSync = await this.syncFile(currentFile, {
+        requireActiveFile: false,
+      });
+
+      if (didSync) {
+        syncedCount += 1;
+      }
+    }
+
+    const fileLabel = syncedCount === 1 ? "file" : "files";
+    new Notice(`File Title Sync reprocessed ${syncedCount} ${fileLabel}.`);
+  }
+
+  private async syncFile(
+    file: TFile,
+    options: SyncFileOptions = { requireActiveFile: true },
+  ): Promise<boolean> {
     const originalPath = file.path;
 
     if (
       !this.settings.enabled ||
-      !this.isActiveFile(file) ||
+      (options.requireActiveFile && !this.isActiveFile(file)) ||
       this.syncingPaths.has(originalPath) ||
       !this.isAllowedFolder(file) ||
       this.isExcludedFolder(file)
     ) {
-      return;
+      return false;
     }
 
     this.syncingPaths.add(originalPath);
@@ -152,7 +197,7 @@ export default class FileTitleSyncPlugin extends Plugin {
     try {
       const content = await this.app.vault.cachedRead(file);
       if (this.hasExcludedTag(content)) {
-        return;
+        return false;
       }
 
       const lines = splitLines(content);
@@ -171,7 +216,8 @@ export default class FileTitleSyncPlugin extends Plugin {
       }
 
       await this.ensureFrontmatterSpacing(file);
-      await this.renameFileIfNeeded(file, title);
+      await this.renameFileIfNeeded(file, title, options);
+      return true;
     } finally {
       this.syncingPaths.delete(originalPath);
     }
@@ -228,8 +274,12 @@ export default class FileTitleSyncPlugin extends Plugin {
     await this.app.vault.process(file, withBlankLineAfterFrontmatter);
   }
 
-  private async renameFileIfNeeded(file: TFile, title: string): Promise<void> {
-    if (!this.isActiveFile(file)) {
+  private async renameFileIfNeeded(
+    file: TFile,
+    title: string,
+    options: SyncFileOptions,
+  ): Promise<void> {
+    if (options.requireActiveFile && !this.isActiveFile(file)) {
       return;
     }
 
@@ -254,8 +304,7 @@ export default class FileTitleSyncPlugin extends Plugin {
     let suffix = 0;
 
     while (true) {
-      const candidateName =
-        suffix === 0 ? safeBaseName : `${safeBaseName}-${suffix + 1}`;
+      const candidateName = withSafeFileSuffix(safeBaseName, suffix);
       const candidatePath = normalizePath(
         `${folderPrefix}${candidateName}.${file.extension}`,
       );
@@ -428,7 +477,49 @@ function toSafeFileBaseName(title: string): string {
     .replace(MULTIPLE_DASHES, "-")
     .replace(EDGE_DASHES, "");
 
-  return safeBaseName.length > 0 ? safeBaseName : "untitled";
+  return truncateToEncodedLength(
+    safeBaseName.length > 0 ? safeBaseName : "untitled",
+    MAX_ENCODED_FILE_BASENAME_LENGTH,
+  );
+}
+
+function withSafeFileSuffix(safeBaseName: string, suffix: number): string {
+  if (suffix === 0) {
+    return safeBaseName;
+  }
+
+  const suffixText = `-${suffix + 1}`;
+  const maxBaseLength =
+    MAX_ENCODED_FILE_BASENAME_LENGTH - getEncodedLength(suffixText);
+  const truncatedBaseName = truncateToEncodedLength(
+    safeBaseName,
+    maxBaseLength,
+  );
+
+  return `${truncatedBaseName}${suffixText}`;
+}
+
+function truncateToEncodedLength(value: string, maxEncodedLength: number): string {
+  let result = "";
+  let encodedLength = 0;
+
+  for (const char of value) {
+    const nextEncodedLength = encodedLength + getEncodedLength(char);
+
+    if (nextEncodedLength > maxEncodedLength) {
+      break;
+    }
+
+    result += char;
+    encodedLength = nextEncodedLength;
+  }
+
+  const trimmed = result.replace(EDGE_DASHES, "");
+  return trimmed.length > 0 ? trimmed : "untitled";
+}
+
+function getEncodedLength(value: string): number {
+  return encodeURIComponent(value).length;
 }
 
 function findFirstH1(lines: string[]): HeadingMatch | null {

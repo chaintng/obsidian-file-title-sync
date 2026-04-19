@@ -8,9 +8,11 @@ Syncs an Obsidian note title across:
 
 The sync runs when the active Markdown editor changes in Obsidian. Files modified outside Obsidian, or files that are not the currently active note, are not synced or renamed.
 
-Filenames are lowercased and converted to web URL-safe slugs by replacing special characters with `-`.
+Filenames are lowercased and converted to web URL-safe slugs by replacing special characters with `-`. The generated filename is capped at 180 percent-encoded URL characters, so non-Latin titles are truncated before copied Obsidian URLs become too long.
 
 When frontmatter exists, the plugin keeps one blank line between the closing frontmatter marker and the note body or H1.
+
+Run **File Title Sync: Resync all file titles** from Obsidian's command palette to reprocess every Markdown file that matches the folder and tag settings.
 
 ## Settings
 

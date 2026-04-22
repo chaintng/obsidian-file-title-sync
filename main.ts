@@ -1,5 +1,6 @@
 import {
   App,
+  Modal,
   Notice,
   normalizePath,
   Plugin,
@@ -10,35 +11,59 @@ import {
 } from "obsidian";
 
 const URL_UNSAFE_FILENAME_CHARS = /[^\p{Letter}\p{Mark}\p{Number}]+/gu;
+const SPECIAL_FILENAME_CHARS = /[^\p{Letter}\p{Mark}\p{Number}\p{Separator}_-]+/gu;
 const MULTIPLE_DASHES = /-{2,}/g;
 const EDGE_DASHES = /^-+|-+$/g;
+const MULTIPLE_SPACES = /\s{2,}/g;
 const H1_PATTERN = /^#(?!#)\s+(.+?)\s*#*\s*$/;
 const INLINE_TAG_PATTERN = /(^|\s)#([A-Za-z0-9_/-]+)/g;
 const EDITOR_CHANGE_SYNC_DELAY_MS = 1_000;
 const MAX_ENCODED_FILE_BASENAME_LENGTH = 180;
 
 type TitleSource = "heading" | "frontmatter" | "filename";
+type RenameStrategy = "slug" | "sanitize";
+
+interface RenameRule {
+  folder: string;
+  strategy: RenameStrategy;
+  enabled: boolean;
+  excludedFolders: string[];
+  includedFiles: string[];
+  excludedFiles: string[];
+}
 
 interface FileTitleSyncSettings {
   enabled: boolean;
   titleSource: TitleSource;
-  onlyFolders: string[];
-  excludedFolders: string[];
   excludedTags: string[];
+  renameRules: RenameRule[];
 }
+
+const DEFAULT_RENAME_RULE: RenameRule = {
+  folder: "",
+  strategy: "slug",
+  enabled: true,
+  excludedFolders: [],
+  includedFiles: [],
+  excludedFiles: [],
+};
 
 const DEFAULT_SETTINGS: FileTitleSyncSettings = {
   enabled: true,
   titleSource: "heading",
-  onlyFolders: [],
-  excludedFolders: [],
   excludedTags: [],
+  renameRules: [],
 };
 
 const TITLE_SOURCE_LABELS: Record<TitleSource, string> = {
   heading: "First H1 heading",
   frontmatter: "Title frontmatter",
   filename: "Filename",
+};
+
+const RENAME_STRATEGY_LABELS: Record<RenameStrategy, string> = {
+  slug: "Slug",
+  sanitize: "Sanitize",
 };
 
 interface FrontmatterRange {
@@ -53,6 +78,11 @@ interface HeadingMatch {
 
 interface SyncFileOptions {
   requireActiveFile: boolean;
+}
+
+interface StoredFileTitleSyncSettings
+  extends Omit<FileTitleSyncSettings, "renameRules"> {
+  renameRules?: Partial<RenameRule>[];
 }
 
 export default class FileTitleSyncPlugin extends Plugin {
@@ -93,24 +123,47 @@ export default class FileTitleSyncPlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     const storedSettings =
-      (await this.loadData()) as Partial<FileTitleSyncSettings> | null;
+      (await this.loadData()) as Partial<StoredFileTitleSyncSettings> | null;
+
     this.settings = {
       ...DEFAULT_SETTINGS,
       ...storedSettings,
-      onlyFolders: cleanList(
-        storedSettings?.onlyFolders ?? DEFAULT_SETTINGS.onlyFolders,
-      ),
-      excludedFolders: cleanList(
-        storedSettings?.excludedFolders ?? DEFAULT_SETTINGS.excludedFolders,
-      ),
       excludedTags: cleanList(
         storedSettings?.excludedTags ?? DEFAULT_SETTINGS.excludedTags,
       ).map(normalizeTag),
+      renameRules: (
+        storedSettings?.renameRules ?? DEFAULT_SETTINGS.renameRules
+      ).map((rule) => normalizeRenameRule(rule)),
     };
   }
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
+  }
+
+  async addRenameRule(): Promise<void> {
+    this.settings.renameRules = [
+      ...this.settings.renameRules,
+      createRenameRule(),
+    ];
+    await this.saveSettings();
+  }
+
+  async updateRenameRule(
+    index: number,
+    updater: (rule: RenameRule) => RenameRule,
+  ): Promise<void> {
+    this.settings.renameRules = this.settings.renameRules.map((rule, ruleIndex) =>
+      ruleIndex === index ? normalizeRenameRule(updater(rule)) : rule,
+    );
+    await this.saveSettings();
+  }
+
+  async removeRenameRule(index: number): Promise<void> {
+    this.settings.renameRules = this.settings.renameRules.filter(
+      (_rule, ruleIndex) => ruleIndex !== index,
+    );
+    await this.saveSettings();
   }
 
   private isMarkdownFile(file: TAbstractFile | null): file is TFile {
@@ -185,9 +238,7 @@ export default class FileTitleSyncPlugin extends Plugin {
     if (
       !this.settings.enabled ||
       (options.requireActiveFile && !this.isActiveFile(file)) ||
-      this.syncingPaths.has(originalPath) ||
-      !this.isAllowedFolder(file) ||
-      this.isExcludedFolder(file)
+      this.syncingPaths.has(originalPath)
     ) {
       return false;
     }
@@ -201,7 +252,7 @@ export default class FileTitleSyncPlugin extends Plugin {
       }
 
       const lines = splitLines(content);
-      const title = this.getCanonicalTitle(content, file);
+      const title = this.getCanonicalTitle(file, lines);
       const nextContent = this.withSyncedHeading(content, title);
       const frontmatterTitle = readFrontmatterTitle(lines);
 
@@ -223,8 +274,7 @@ export default class FileTitleSyncPlugin extends Plugin {
     }
   }
 
-  private getCanonicalTitle(content: string, file: TFile): string {
-    const lines = splitLines(content);
+  private getCanonicalTitle(file: TFile, lines: string[]): string {
     const titleCandidates: Record<TitleSource, string | null> = {
       heading: findFirstH1(lines)?.title ?? null,
       frontmatter: readFrontmatterTitle(lines),
@@ -267,11 +317,9 @@ export default class FileTitleSyncPlugin extends Plugin {
     const content = await this.app.vault.cachedRead(file);
     const nextContent = withBlankLineAfterFrontmatter(content);
 
-    if (nextContent === content) {
-      return;
+    if (nextContent !== content) {
+      await this.app.vault.process(file, withBlankLineAfterFrontmatter);
     }
-
-    await this.app.vault.process(file, withBlankLineAfterFrontmatter);
   }
 
   private async renameFileIfNeeded(
@@ -283,14 +331,28 @@ export default class FileTitleSyncPlugin extends Plugin {
       return;
     }
 
-    const safeBaseName = toSafeFileBaseName(title);
-    const targetPath = await this.getAvailablePath(file, safeBaseName);
+    const rule = this.getMatchingRenameRule(file);
 
-    if (targetPath === file.path) {
+    if (rule === null) {
       return;
     }
 
-    await this.app.fileManager.renameFile(file, targetPath);
+    const safeBaseName = buildFileBaseName(title, rule.strategy);
+    const targetPath = await this.getAvailablePath(file, safeBaseName);
+
+    if (targetPath !== file.path) {
+      await this.app.fileManager.renameFile(file, targetPath);
+    }
+  }
+
+  private getMatchingRenameRule(file: TFile): RenameRule | null {
+    for (const rule of this.settings.renameRules) {
+      if (matchesRenameRule(file, rule)) {
+        return rule;
+      }
+    }
+
+    return null;
   }
 
   private async getAvailablePath(
@@ -316,22 +378,6 @@ export default class FileTitleSyncPlugin extends Plugin {
 
       suffix += 1;
     }
-  }
-
-  private isExcludedFolder(file: TFile): boolean {
-    return this.settings.excludedFolders.some((folder) =>
-      isPathInFolder(file.path, folder),
-    );
-  }
-
-  private isAllowedFolder(file: TFile): boolean {
-    if (this.settings.onlyFolders.length === 0) {
-      return true;
-    }
-
-    return this.settings.onlyFolders.some((folder) =>
-      isPathInFolder(file.path, folder),
-    );
   }
 
   private hasExcludedTag(content: string): boolean {
@@ -360,7 +406,9 @@ class FileTitleSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Enable title sync")
-      .setDesc("When disabled, the plugin will not sync headings, frontmatter, or filenames.")
+      .setDesc(
+        "When disabled, the plugin will not sync headings, frontmatter, or filenames.",
+      )
       .addToggle((toggle) => {
         toggle
           .setValue(this.plugin.settings.enabled)
@@ -389,36 +437,6 @@ class FileTitleSyncSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Only folders")
-      .setDesc(
-        "One folder path per line. When set, only notes inside these folders are synced.",
-      )
-      .addTextArea((text) => {
-        text
-          .setPlaceholder("Writing\nPublished")
-          .setValue(this.plugin.settings.onlyFolders.join("\n"))
-          .onChange(async (value) => {
-            this.plugin.settings.onlyFolders = cleanList(value.split("\n"));
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Excluded folders")
-      .setDesc(
-        "One folder path per line. A folder excludes every note inside it.",
-      )
-      .addTextArea((text) => {
-        text
-          .setPlaceholder("Templates\nArchive/Private")
-          .setValue(this.plugin.settings.excludedFolders.join("\n"))
-          .onChange(async (value) => {
-            this.plugin.settings.excludedFolders = cleanList(value.split("\n"));
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
       .setName("Excluded tags")
       .setDesc(
         "One tag per line, with or without #. Notes with any matching tag are skipped.",
@@ -434,6 +452,208 @@ class FileTitleSyncSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
       });
+
+    containerEl.createEl("h3", { text: "Rename rules" });
+    containerEl.createEl("p", {
+      text: "Rules are checked from top to bottom. The first matching folder rule decides how the filename is renamed.",
+    });
+
+    this.plugin.settings.renameRules.forEach((rule, index) => {
+      this.renderRenameRule(index, rule);
+    });
+
+    new Setting(containerEl)
+      .setName("Add rename rule")
+      .setDesc("Create a new folder-scoped rename rule.")
+      .addButton((button) => {
+        button.setButtonText("Add rule").onClick(async () => {
+          await this.plugin.addRenameRule();
+          this.display();
+        });
+      });
+  }
+
+  private renderRenameRule(index: number, rule: RenameRule): void {
+    const sectionEl = this.containerEl.createDiv("file-title-sync-rule");
+    new Setting(sectionEl)
+      .setName(`Rule ${index + 1}`)
+      .setDesc(describeRenameRule(rule))
+      .addButton((button) => {
+        button.setButtonText("Edit").onClick(() => {
+          new RenameRuleModal(this.app, rule, async (nextRule) => {
+            await this.plugin.updateRenameRule(index, () => nextRule);
+            this.display();
+          }).open();
+        });
+      })
+      .addExtraButton((button) => {
+        button
+          .setIcon("up-chevron-glyph")
+          .setTooltip("Move up")
+          .onClick(async () => {
+            await this.moveRule(index, -1);
+          });
+      })
+      .addExtraButton((button) => {
+        button
+          .setIcon("down-chevron-glyph")
+          .setTooltip("Move down")
+          .onClick(async () => {
+            await this.moveRule(index, 1);
+          });
+      })
+      .addExtraButton((button) => {
+        button
+          .setIcon(rule.enabled ? "check-circle" : "circle-slash")
+          .setTooltip(rule.enabled ? "Disable rule" : "Enable rule")
+          .onClick(async () => {
+            await this.plugin.updateRenameRule(index, (currentRule) => ({
+              ...currentRule,
+              enabled: !currentRule.enabled,
+            }));
+            this.display();
+          });
+      })
+      .addButton((button) => {
+        button.setWarning().setButtonText("Remove").onClick(async () => {
+          await this.plugin.removeRenameRule(index);
+          this.display();
+        });
+      });
+  }
+
+  private async moveRule(index: number, direction: -1 | 1): Promise<void> {
+    const nextIndex = index + direction;
+
+    if (
+      nextIndex < 0 ||
+      nextIndex >= this.plugin.settings.renameRules.length
+    ) {
+      return;
+    }
+
+    const nextRules = [...this.plugin.settings.renameRules];
+    const [rule] = nextRules.splice(index, 1);
+    nextRules.splice(nextIndex, 0, rule);
+    this.plugin.settings.renameRules = nextRules;
+    await this.plugin.saveSettings();
+    this.display();
+  }
+}
+
+class RenameRuleModal extends Modal {
+  private draftRule: RenameRule;
+
+  constructor(
+    app: App,
+    rule: RenameRule,
+    private readonly onSaveRule: (rule: RenameRule) => Promise<void>,
+  ) {
+    super(app);
+    this.draftRule = { ...rule };
+  }
+
+  onOpen(): void {
+    const { contentEl, titleEl } = this;
+    titleEl.setText("Edit rename rule");
+    contentEl.empty();
+
+    new Setting(contentEl)
+      .setName("Folder")
+      .setDesc(
+        "Vault-relative folder path for this rule. Leave blank to match all folders. Subfolders inherit the rule.",
+      )
+      .addText((text) => {
+        text
+          .setPlaceholder("Writing")
+          .setValue(this.draftRule.folder)
+          .onChange((value) => {
+            this.draftRule.folder = value.trim();
+          });
+      });
+
+    new Setting(contentEl)
+      .setName("Strategy")
+      .setDesc(
+        "Slug lowercases and replaces special characters with dashes. Sanitize keeps case and spaces, and only removes special characters.",
+      )
+      .addDropdown((dropdown) => {
+        Object.entries(RENAME_STRATEGY_LABELS).forEach(([value, label]) => {
+          dropdown.addOption(value, label);
+        });
+
+        dropdown.setValue(this.draftRule.strategy).onChange((value) => {
+          this.draftRule.strategy = toRenameStrategy(value);
+        });
+      });
+
+    new Setting(contentEl)
+      .setName("Enabled")
+      .setDesc("Disable this rule without deleting it.")
+      .addToggle((toggle) => {
+        toggle.setValue(this.draftRule.enabled).onChange((value) => {
+          this.draftRule.enabled = value;
+        });
+      });
+
+    new Setting(contentEl)
+      .setName("Excluded folders")
+      .setDesc(
+        "One folder path per line. Notes inside these folders are skipped even when they are inside the main folder.",
+      )
+      .addTextArea((text) => {
+        text
+          .setPlaceholder("Writing/Templates")
+          .setValue(this.draftRule.excludedFolders.join("\n"))
+          .onChange((value) => {
+            this.draftRule.excludedFolders = cleanList(value.split("\n"));
+          });
+      });
+
+    new Setting(contentEl)
+      .setName("Included files")
+      .setDesc(
+        "One vault-relative file path per line. When set, only these files can use this rule.",
+      )
+      .addTextArea((text) => {
+        text
+          .setPlaceholder("Writing/My Note.md")
+          .setValue(this.draftRule.includedFiles.join("\n"))
+          .onChange((value) => {
+            this.draftRule.includedFiles = cleanList(value.split("\n"));
+          });
+      });
+
+    new Setting(contentEl)
+      .setName("Excluded files")
+      .setDesc(
+        "One vault-relative file path per line. Matching files are skipped by this rule.",
+      )
+      .addTextArea((text) => {
+        text
+          .setPlaceholder("Writing/Templates/Daily.md")
+          .setValue(this.draftRule.excludedFiles.join("\n"))
+          .onChange((value) => {
+            this.draftRule.excludedFiles = cleanList(value.split("\n"));
+          });
+      });
+
+    new Setting(contentEl)
+      .addButton((button) => {
+        button.setButtonText("Cancel").onClick(() => {
+          this.close();
+        });
+      })
+      .addButton((button) => {
+        button.setCta().setButtonText("Save").onClick(async () => {
+          await this.onSaveRule(this.draftRule);
+          this.close();
+        });
+      });
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
   }
 }
 
@@ -447,12 +667,39 @@ function cleanList(values: string[]): string[] {
     .filter((value) => value.length > 0);
 }
 
+function createRenameRule(): RenameRule {
+  return {
+    ...DEFAULT_RENAME_RULE,
+  };
+}
+
+function normalizeRenameRule(rule: Partial<RenameRule> | undefined): RenameRule {
+  return {
+    folder: normalizeFolderPath(rule?.folder ?? DEFAULT_RENAME_RULE.folder),
+    strategy: toRenameStrategy(rule?.strategy),
+    enabled: rule?.enabled ?? DEFAULT_RENAME_RULE.enabled,
+    excludedFolders: cleanList(
+      rule?.excludedFolders ?? DEFAULT_RENAME_RULE.excludedFolders,
+    ).map(normalizeFolderPath),
+    includedFiles: cleanList(
+      rule?.includedFiles ?? DEFAULT_RENAME_RULE.includedFiles,
+    ).map(normalizePath),
+    excludedFiles: cleanList(
+      rule?.excludedFiles ?? DEFAULT_RENAME_RULE.excludedFiles,
+    ).map(normalizePath),
+  };
+}
+
 function toTitleSource(value: string): TitleSource {
   if (value === "frontmatter" || value === "filename") {
     return value;
   }
 
   return "heading";
+}
+
+function toRenameStrategy(value: string | undefined): RenameStrategy {
+  return value === "sanitize" ? "sanitize" : "slug";
 }
 
 function getTitleSourceOrder(primarySource: TitleSource): TitleSource[] {
@@ -468,7 +715,39 @@ function normalizeTitle(title: string): string {
   return normalized.length > 0 ? normalized : "Untitled";
 }
 
-function toSafeFileBaseName(title: string): string {
+function describeRenameRule(rule: RenameRule): string {
+  const folder = rule.folder.length > 0 ? rule.folder : "All folders";
+  const details = [
+    rule.enabled ? "Enabled" : "Disabled",
+    `folder: ${folder}`,
+    `strategy: ${RENAME_STRATEGY_LABELS[rule.strategy]}`,
+  ];
+
+  if (rule.excludedFolders.length > 0) {
+    details.push(`excluded folders: ${rule.excludedFolders.length}`);
+  }
+
+  if (rule.includedFiles.length > 0) {
+    details.push(`included files: ${rule.includedFiles.length}`);
+  }
+
+  if (rule.excludedFiles.length > 0) {
+    details.push(`excluded files: ${rule.excludedFiles.length}`);
+  }
+
+  return details.join(" • ");
+}
+
+function buildFileBaseName(
+  title: string,
+  strategy: RenameStrategy,
+): string {
+  return strategy === "sanitize"
+    ? toSanitizedFileBaseName(title)
+    : toSlugFileBaseName(title);
+}
+
+function toSlugFileBaseName(title: string): string {
   const safeBaseName = title
     .normalize("NFC")
     .toLowerCase()
@@ -479,6 +758,20 @@ function toSafeFileBaseName(title: string): string {
 
   return truncateToEncodedLength(
     safeBaseName.length > 0 ? safeBaseName : "untitled",
+    MAX_ENCODED_FILE_BASENAME_LENGTH,
+  );
+}
+
+function toSanitizedFileBaseName(title: string): string {
+  const safeBaseName = title
+    .normalize("NFC")
+    .trim()
+    .replace(SPECIAL_FILENAME_CHARS, "")
+    .replace(MULTIPLE_SPACES, " ")
+    .trim();
+
+  return truncateToEncodedLength(
+    safeBaseName.length > 0 ? safeBaseName : "Untitled",
     MAX_ENCODED_FILE_BASENAME_LENGTH,
   );
 }
@@ -514,12 +807,41 @@ function truncateToEncodedLength(value: string, maxEncodedLength: number): strin
     encodedLength = nextEncodedLength;
   }
 
-  const trimmed = result.replace(EDGE_DASHES, "");
+  const trimmed = result.replace(EDGE_DASHES, "").trim();
   return trimmed.length > 0 ? trimmed : "untitled";
 }
 
 function getEncodedLength(value: string): number {
   return encodeURIComponent(value).length;
+}
+
+function matchesRenameRule(file: TFile, rule: RenameRule): boolean {
+  if (!rule.enabled) {
+    return false;
+  }
+
+  if (rule.folder.length > 0 && !isPathInFolder(file.path, rule.folder)) {
+    return false;
+  }
+
+  if (
+    rule.excludedFolders.some((folder) => isPathInFolder(file.path, folder))
+  ) {
+    return false;
+  }
+
+  if (
+    rule.includedFiles.length > 0 &&
+    !rule.includedFiles.some((path) => isSameFilePath(file.path, path))
+  ) {
+    return false;
+  }
+
+  if (rule.excludedFiles.some((path) => isSameFilePath(file.path, path))) {
+    return false;
+  }
+
+  return true;
 }
 
 function findFirstH1(lines: string[]): HeadingMatch | null {
@@ -672,17 +994,22 @@ function normalizeTag(tag: string): string {
   return tag.trim().replace(/^#/, "").toLowerCase();
 }
 
+function normalizeFolderPath(value: string): string {
+  return normalizePath(value).replace(/^\/+|\/+$/g, "");
+}
+
 function isPathInFolder(filePath: string, folderPath: string): boolean {
   const normalizedFilePath = normalizePath(filePath);
-  const normalizedFolderPath = normalizePath(folderPath).replace(
-    /^\/+|\/+$/g,
-    "",
-  );
+  const normalizedFolderPath = normalizeFolderPath(folderPath);
 
   return (
     normalizedFilePath === normalizedFolderPath ||
     normalizedFilePath.startsWith(`${normalizedFolderPath}/`)
   );
+}
+
+function isSameFilePath(left: string, right: string): boolean {
+  return normalizePath(left) === normalizePath(right);
 }
 
 function unwrapYamlString(value: string): string {

@@ -8,11 +8,16 @@ Syncs an Obsidian note title across:
 
 The sync runs when the active Markdown editor changes in Obsidian. Files modified outside Obsidian, or files that are not the currently active note, are not synced or renamed.
 
-Filenames are lowercased and converted to web URL-safe slugs by replacing special characters with `-`. The generated filename is capped at 180 percent-encoded URL characters, so non-Latin titles are truncated before copied Obsidian URLs become too long.
+Filenames are renamed by ordered folder rules. The first rule that matches a note decides how the filename is generated:
+
+- `Slug`: lowercase, replace special characters with `-`, and truncate for safe URL length.
+- `Sanitize`: keep case and spaces, and only remove special characters such as `(` and `)`.
+
+The generated filename is capped at 180 percent-encoded URL characters, so non-Latin titles are truncated before copied Obsidian URLs become too long.
 
 When frontmatter exists, the plugin keeps one blank line between the closing frontmatter marker and the note body or H1.
 
-Run **File Title Sync: Resync all file titles** from Obsidian's command palette to reprocess every Markdown file that matches the folder and tag settings.
+Run **File Title Sync: Resync all file titles** from Obsidian's command palette to reprocess every Markdown file that matches the tag and rename rule settings.
 
 ## Settings
 
@@ -21,9 +26,10 @@ Run **File Title Sync: Resync all file titles** from Obsidian's command palette 
   - First H1 heading
   - Title frontmatter
   - Filename
-- **Only folders**: one folder path per line. When set, only notes inside matching folders are synced.
-- **Excluded folders**: one folder path per line. Every note inside a matching folder is skipped.
 - **Excluded tags**: one tag per line, with or without `#`. Notes with matching frontmatter or inline tags are skipped.
+- **Rename rules**: ordered folder items with their own strategy, enabled state, excluded subfolders, included files, and excluded files.
+
+This is a breaking change from the previous settings model. Legacy rename settings are not migrated.
 
 If the selected source of truth is missing or blank, the plugin falls back to the other title sources in this order:
 

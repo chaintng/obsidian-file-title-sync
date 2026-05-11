@@ -100,18 +100,19 @@ export default class FileTitleSyncPlugin extends Plugin {
         void this.resyncAllFiles();
       },
     });
-
-    this.app.workspace.onLayoutReady(() => {
-      this.registerEvent(
-        this.app.workspace.on("editor-change", (_editor, info) => {
-          const file = info.file;
-
-          if (file !== null) {
-            this.scheduleSyncFile(file);
-          }
-        }),
-      );
+    this.addCommand({
+      id: "resync-current-file-title",
+      name: "Sync current file title",
+      callback: () => {
+        void this.syncCurrentFile();
+      },
     });
+
+    this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        this.scheduleSyncFile(file);
+      }),
+    );
   }
 
   onunload(): void {
@@ -178,10 +179,13 @@ export default class FileTitleSyncPlugin extends Plugin {
     );
   }
 
-  private scheduleSyncFile(file: TFile): void {
+  private scheduleSyncFile(file: TAbstractFile): void {
+    if (!this.isMarkdownFile(file)) {
+      return;
+    }
+
     if (
       !this.settings.enabled ||
-      !this.isMarkdownFile(file) ||
       !this.isActiveFile(file)
     ) {
       return;
@@ -227,6 +231,23 @@ export default class FileTitleSyncPlugin extends Plugin {
 
     const fileLabel = syncedCount === 1 ? "file" : "files";
     new Notice(`File Title Sync reprocessed ${syncedCount} ${fileLabel}.`);
+  }
+
+  private async syncCurrentFile(): Promise<void> {
+    const activeFile = this.app.workspace.getActiveFile();
+
+    if (!this.isMarkdownFile(activeFile)) {
+      new Notice("No active markdown file to sync.");
+      return;
+    }
+
+    const didSync = await this.syncFile(activeFile);
+
+    if (didSync) {
+      new Notice("File Title Sync synced current file.");
+    } else {
+      new Notice("File Title Sync did not update current file.");
+    }
   }
 
   private async syncFile(

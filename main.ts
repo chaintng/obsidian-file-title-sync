@@ -14,7 +14,6 @@ const URL_UNSAFE_FILENAME_CHARS = /[^\p{Letter}\p{Mark}\p{Number}]+/gu;
 const SPECIAL_FILENAME_CHARS = /[^\p{Letter}\p{Mark}\p{Number}\p{Separator}_-]+/gu;
 const MULTIPLE_DASHES = /-{2,}/g;
 const EDGE_DASHES = /^-+|-+$/g;
-const MULTIPLE_SPACES = /\s{2,}/g;
 const H1_PATTERN = /^#(?!#)\s+(.+?)\s*#*\s*$/;
 const INLINE_TAG_PATTERN = /(^|\s)#([A-Za-z0-9_/-]+)/g;
 const EDITOR_CHANGE_SYNC_DELAY_MS = 1_000;
@@ -36,6 +35,7 @@ interface FileTitleSyncSettings {
   enabled: boolean;
   titleSource: TitleSource;
   excludedTags: string[];
+  excludedFolders: string[];
   renameRules: RenameRule[];
 }
 
@@ -52,6 +52,7 @@ const DEFAULT_SETTINGS: FileTitleSyncSettings = {
   enabled: true,
   titleSource: "heading",
   excludedTags: [],
+  excludedFolders: [],
   renameRules: [],
 };
 
@@ -132,6 +133,9 @@ export default class FileTitleSyncPlugin extends Plugin {
       excludedTags: cleanList(
         storedSettings?.excludedTags ?? DEFAULT_SETTINGS.excludedTags,
       ).map(normalizeTag),
+      excludedFolders: cleanList(
+        storedSettings?.excludedFolders ?? DEFAULT_SETTINGS.excludedFolders,
+      ).map(normalizeFolderPath),
       renameRules: (
         storedSettings?.renameRules ?? DEFAULT_SETTINGS.renameRules
       ).map((rule) => normalizeRenameRule(rule)),
@@ -186,6 +190,7 @@ export default class FileTitleSyncPlugin extends Plugin {
 
     if (
       !this.settings.enabled ||
+      this.isGloballyExcludedFile(file) ||
       !this.isActiveFile(file)
     ) {
       return;
@@ -258,6 +263,7 @@ export default class FileTitleSyncPlugin extends Plugin {
 
     if (
       !this.settings.enabled ||
+      this.isGloballyExcludedFile(file) ||
       (options.requireActiveFile && !this.isActiveFile(file)) ||
       this.syncingPaths.has(originalPath)
     ) {
@@ -405,6 +411,10 @@ export default class FileTitleSyncPlugin extends Plugin {
       fileTags.includes(excludedTag),
     );
   }
+
+  private isGloballyExcludedFile(file: TFile): boolean {
+    return isPathInExcludedFolders(file.path, this.settings.excludedFolders);
+  }
 }
 
 class FileTitleSyncSettingTab extends PluginSettingTab {
@@ -436,7 +446,7 @@ class FileTitleSyncSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Source of truth")
       .setDesc(
-        "When titles mismatch, this value wins. The title metadata field syncs with headings; the filename metadata field is one-way and only renames the file when present.",
+        "When titles mismatch, this value wins. Metadata field behavior is described below.",
       )
       .addDropdown((dropdown) => {
         Object.entries(TITLE_SOURCE_LABELS).forEach(([value, label]) => {
@@ -451,6 +461,21 @@ class FileTitleSyncSettingTab extends PluginSettingTab {
           });
       });
 
+    containerEl.createEl("h3", { text: "Frontmatter metadata" });
+    containerEl.createEl("p", {
+      text: "These YAML frontmatter fields are used by File Title Sync:",
+    });
+    const metadataListEl = containerEl.createEl("ul");
+    metadataListEl.createEl("li", {
+      text: "title: synced with the selected source of truth and the first H1 heading.",
+    });
+    metadataListEl.createEl("li", {
+      text: "filename: one-way rename metadata. When present and not blank, it takes priority for the actual filename, then still goes through the matching rename rule's slug or sanitize strategy. The plugin does not write back to filename.",
+    });
+    metadataListEl.createEl("li", {
+      text: "tags: checked against excluded tags. Matching notes are skipped and are not synced or renamed.",
+    });
+
     new Setting(containerEl)
       .setName("Excluded tags")
       .setDesc(
@@ -464,6 +489,23 @@ class FileTitleSyncSettingTab extends PluginSettingTab {
             this.plugin.settings.excludedTags = cleanList(
               value.split("\n"),
             ).map(normalizeTag);
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Excluded folders")
+      .setDesc(
+        "One vault-relative folder path per line. Notes inside these folders are skipped before title, metadata, or filename sync runs.",
+      )
+      .addTextArea((text) => {
+        text
+          .setPlaceholder("Templates\nArchive/Imported")
+          .setValue(this.plugin.settings.excludedFolders.join("\n"))
+          .onChange(async (value) => {
+            this.plugin.settings.excludedFolders = cleanList(
+              value.split("\n"),
+            ).map(normalizeFolderPath);
             await this.plugin.saveSettings();
           });
       });
@@ -590,7 +632,7 @@ class RenameRuleModal extends Modal {
     new Setting(contentEl)
       .setName("Strategy")
       .setDesc(
-        "Slug lowercases and replaces special characters with dashes. Sanitize keeps case and spaces, and only removes special characters.",
+        "Slug lowercases and replaces special characters with dashes. Sanitize keeps case, but spaces and special characters become dashes.",
       )
       .addDropdown((dropdown) => {
         Object.entries(RENAME_STRATEGY_LABELS).forEach(([value, label]) => {
@@ -812,14 +854,7 @@ export function buildFileBaseName(
 }
 
 function toSlugFileBaseName(title: string): string {
-  const safeBaseName = title
-    .normalize("NFC")
-    .toLowerCase()
-    .trim()
-    .replace(URL_UNSAFE_FILENAME_CHARS, "-")
-    .replace(MULTIPLE_DASHES, "-")
-    .replace(EDGE_DASHES, "");
-
+  const safeBaseName = toDashSeparatedFileBaseName(title.toLowerCase());
   return truncateToEncodedLength(
     safeBaseName.length > 0 ? safeBaseName : "untitled",
     MAX_ENCODED_FILE_BASENAME_LENGTH,
@@ -827,17 +862,21 @@ function toSlugFileBaseName(title: string): string {
 }
 
 function toSanitizedFileBaseName(title: string): string {
-  const safeBaseName = title
-    .normalize("NFC")
-    .trim()
-    .replace(SPECIAL_FILENAME_CHARS, "")
-    .replace(MULTIPLE_SPACES, " ")
-    .trim();
-
+  const safeBaseName = toDashSeparatedFileBaseName(title);
   return truncateToEncodedLength(
     safeBaseName.length > 0 ? safeBaseName : "Untitled",
     MAX_ENCODED_FILE_BASENAME_LENGTH,
   );
+}
+
+function toDashSeparatedFileBaseName(title: string): string {
+  return title
+    .normalize("NFC")
+    .trim()
+    .replace(SPECIAL_FILENAME_CHARS, "-")
+    .replace(URL_UNSAFE_FILENAME_CHARS, "-")
+    .replace(MULTIPLE_DASHES, "-")
+    .replace(EDGE_DASHES, "");
 }
 
 function withSafeFileSuffix(safeBaseName: string, suffix: number): string {
@@ -1071,6 +1110,13 @@ function normalizeTag(tag: string): string {
 
 function normalizeFolderPath(value: string): string {
   return normalizePath(value).replace(/^\/+|\/+$/g, "");
+}
+
+export function isPathInExcludedFolders(
+  filePath: string,
+  excludedFolders: string[],
+): boolean {
+  return excludedFolders.some((folder) => isPathInFolder(filePath, folder));
 }
 
 function isPathInFolder(filePath: string, folderPath: string): boolean {

@@ -14,7 +14,7 @@ When a note has `filename` frontmatter, that metadata is used only for the file 
 Filenames are renamed by ordered folder rules. The first rule that matches a note decides how the filename is generated:
 
 - `Slug`: lowercase, replace special characters with `-`, and truncate for safe URL length.
-- `Sanitize`: keep case and spaces, and only remove special characters such as `(` and `)`.
+- `Sanitize`: keep case, but replace spaces and special characters such as `(` and `)` with `-`.
 
 The generated filename is capped at 180 percent-encoded URL characters, so non-Latin titles are truncated before copied Obsidian URLs become too long.
 
@@ -31,6 +31,7 @@ Run **File Title Sync: Resync all file titles** from Obsidian's command palette 
   - Filename
 - **Metadata fields**: `title` is synced with the H1/title source, while `filename` is one-way metadata for the actual filename.
 - **Excluded tags**: one tag per line, with or without `#`. Notes with matching frontmatter or inline tags are skipped.
+- **Excluded folders**: one vault-relative folder path per line. Notes inside matching folders are skipped before title, metadata, or filename sync runs.
 - **Rename rules**: ordered folder items with their own strategy, enabled state, excluded subfolders, included files, and excluded files.
 
 This is a breaking change from the previous settings model. Legacy rename settings are not migrated.

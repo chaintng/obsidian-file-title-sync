@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   buildFileBaseName,
+  isPathInExcludedFolders,
   readFrontmatterTitle,
   selectRenameTitle,
   splitLines,
@@ -24,7 +25,7 @@ title: Existing Title
     });
 
     assert.equal(renameTitle, "My Draft (v2)!");
-    assert.equal(buildFileBaseName(renameTitle, "sanitize"), "My Draft v2");
+    assert.equal(buildFileBaseName(renameTitle, "sanitize"), "My-Draft-v2");
   });
 
   it("falls back to title frontmatter when filename frontmatter is missing", () => {
@@ -60,6 +61,23 @@ title: Existing Title
         canonicalTitle: "Existing Title",
       }),
       "Existing Title",
+    );
+  });
+});
+
+describe("global excluded folders", () => {
+  it("matches files inside normalized excluded folders", () => {
+    assert.equal(
+      isPathInExcludedFolders("Projects/Drafts/Note.md", [
+        "/Projects/Drafts/",
+      ]),
+      true,
+    );
+    assert.equal(
+      isPathInExcludedFolders("Projects/Published/Note.md", [
+        "/Projects/Drafts/",
+      ]),
+      false,
     );
   });
 });

@@ -1,4 +1,6 @@
+main.js
 node_modules/
+.tmp/
 .DS_Store
 data.json
 pnpm-lock.yaml

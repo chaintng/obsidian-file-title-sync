@@ -5,8 +5,11 @@ Syncs an Obsidian note title across:
 - the filename
 - the first Markdown H1
 - the `title` frontmatter property
+- the `filename` frontmatter property for one-way filename renames
 
-The sync runs when the active Markdown editor changes in Obsidian. Files modified outside Obsidian, or files that are not the currently active note, are not synced or renamed.
+The sync runs when the active Markdown file is modified in Obsidian. Files modified outside Obsidian, or files that are not the currently active note, are not synced or renamed.
+
+When a note has `filename` frontmatter, that metadata is used only for the file rename and takes priority over the synced title. The value still goes through the matching rename rule's slug or sanitize strategy before the file is renamed. The plugin does not write back to `filename`.
 
 Filenames are renamed by ordered folder rules. The first rule that matches a note decides how the filename is generated:
 
@@ -26,6 +29,7 @@ Run **File Title Sync: Resync all file titles** from Obsidian's command palette 
   - First H1 heading
   - Title frontmatter
   - Filename
+- **Metadata fields**: `title` is synced with the H1/title source, while `filename` is one-way metadata for the actual filename.
 - **Excluded tags**: one tag per line, with or without `#`. Notes with matching frontmatter or inline tags are skipped.
 - **Rename rules**: ordered folder items with their own strategy, enabled state, excluded subfolders, included files, and excluded files.
 

@@ -274,6 +274,10 @@ export default class FileTitleSyncPlugin extends Plugin {
 
       const lines = splitLines(content);
       const title = this.getCanonicalTitle(file, lines);
+      const renameTitle = selectRenameTitle({
+        lines,
+        canonicalTitle: title,
+      });
       const nextContent = this.withSyncedHeading(content, title);
       const frontmatterTitle = readFrontmatterTitle(lines);
 
@@ -288,7 +292,7 @@ export default class FileTitleSyncPlugin extends Plugin {
       }
 
       await this.ensureFrontmatterSpacing(file);
-      await this.renameFileIfNeeded(file, title, options);
+      await this.renameFileIfNeeded(file, renameTitle, options);
       return true;
     } finally {
       this.syncingPaths.delete(originalPath);
@@ -296,21 +300,11 @@ export default class FileTitleSyncPlugin extends Plugin {
   }
 
   private getCanonicalTitle(file: TFile, lines: string[]): string {
-    const titleCandidates: Record<TitleSource, string | null> = {
-      heading: findFirstH1(lines)?.title ?? null,
-      frontmatter: readFrontmatterTitle(lines),
-      filename: file.basename,
-    };
-
-    for (const source of getTitleSourceOrder(this.settings.titleSource)) {
-      const candidate = titleCandidates[source];
-
-      if (candidate !== null && candidate.trim().length > 0) {
-        return normalizeTitle(candidate);
-      }
-    }
-
-    return "Untitled";
+    return selectCanonicalTitle({
+      primarySource: this.settings.titleSource,
+      lines,
+      fileBasename: file.basename,
+    });
   }
 
   private withSyncedHeading(content: string, title: string): string {
@@ -442,7 +436,7 @@ class FileTitleSyncSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Source of truth")
       .setDesc(
-        "When titles mismatch, this value wins. If it is missing, the plugin falls back to the other title locations.",
+        "When titles mismatch, this value wins. The title metadata field syncs with headings; the filename metadata field is one-way and only renames the file when present.",
       )
       .addDropdown((dropdown) => {
         Object.entries(TITLE_SOURCE_LABELS).forEach(([value, label]) => {
@@ -678,7 +672,7 @@ class RenameRuleModal extends Modal {
   }
 }
 
-function splitLines(content: string): string[] {
+export function splitLines(content: string): string[] {
   return content.replace(/\r\n/g, "\n").split("\n");
 }
 
@@ -731,6 +725,55 @@ function getTitleSourceOrder(primarySource: TitleSource): TitleSource[] {
   ];
 }
 
+interface SelectCanonicalTitleInput {
+  primarySource: TitleSource;
+  lines: string[];
+  fileBasename: string;
+}
+
+export function selectCanonicalTitle({
+  primarySource,
+  lines,
+  fileBasename,
+}: SelectCanonicalTitleInput): string {
+  const titleCandidates: Record<TitleSource, string | null> = {
+    heading: findFirstH1(lines)?.title ?? null,
+    frontmatter: readFrontmatterTitle(lines),
+    filename: fileBasename,
+  };
+
+  for (const source of getTitleSourceOrder(primarySource)) {
+    const candidate = titleCandidates[source];
+
+    if (candidate !== null && candidate.trim().length > 0) {
+      return normalizeTitle(candidate);
+    }
+  }
+
+  return "Untitled";
+}
+
+interface SelectRenameTitleInput {
+  lines: string[];
+  canonicalTitle: string;
+}
+
+export function selectRenameTitle({
+  lines,
+  canonicalTitle,
+}: SelectRenameTitleInput): string {
+  const frontmatterFilename = readFrontmatterFilename(lines);
+
+  if (
+    frontmatterFilename !== null &&
+    frontmatterFilename.trim().length > 0
+  ) {
+    return normalizeTitle(frontmatterFilename);
+  }
+
+  return canonicalTitle;
+}
+
 function normalizeTitle(title: string): string {
   const normalized = title.trim().replace(/\s+/g, " ");
   return normalized.length > 0 ? normalized : "Untitled";
@@ -759,7 +802,7 @@ function describeRenameRule(rule: RenameRule): string {
   return details.join(" • ");
 }
 
-function buildFileBaseName(
+export function buildFileBaseName(
   title: string,
   strategy: RenameStrategy,
 ): string {
@@ -921,7 +964,18 @@ function ensureBlankLineAfterFrontmatter(lines: string[]): void {
   }
 }
 
-function readFrontmatterTitle(lines: string[]): string | null {
+export function readFrontmatterTitle(lines: string[]): string | null {
+  return readFrontmatterString(lines, "title");
+}
+
+function readFrontmatterFilename(lines: string[]): string | null {
+  return readFrontmatterString(lines, "filename");
+}
+
+function readFrontmatterString(
+  lines: string[],
+  key: "title" | "filename",
+): string | null {
   const frontmatterRange = findFrontmatterRange(lines);
 
   if (frontmatterRange === null) {
@@ -933,7 +987,7 @@ function readFrontmatterTitle(lines: string[]): string | null {
     index < frontmatterRange.endLine;
     index += 1
   ) {
-    const match = lines[index].match(/^title:\s*(.+)$/);
+    const match = lines[index].match(new RegExp(`^${key}:\\s*(.+)$`));
 
     if (match !== null) {
       return unwrapYamlString(match[1]);

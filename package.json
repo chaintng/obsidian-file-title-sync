@@ -1,6 +1,6 @@
 {
   "name": "obsidian-file-title-sync",
-  "version": "0.1.1",
+  "version": "0.1.5",
   "description": "Sync Obsidian note titles across filename, first H1, and title frontmatter.",
   "main": "main.js",
   "scripts": {

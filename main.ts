@@ -8,6 +8,7 @@ import {
   Setting,
   TAbstractFile,
   TFile,
+  TFolder,
 } from "obsidian";
 
 const URL_UNSAFE_FILENAME_CHARS = /[^\p{Letter}\p{Mark}\p{Number}]+/gu;
@@ -18,6 +19,8 @@ const H1_PATTERN = /^#(?!#)\s+(.+?)\s*#*\s*$/;
 const INLINE_TAG_PATTERN = /(^|\s)#([A-Za-z0-9_/-]+)/g;
 const EDITOR_CHANGE_SYNC_DELAY_MS = 1_000;
 const MAX_ENCODED_FILE_BASENAME_LENGTH = 180;
+const FOLDER_NOTE_BASENAME = "index";
+const FOLDER_NOTE_TAG = "folder-note";
 
 type TitleSource = "heading" | "frontmatter" | "filename";
 type RenameStrategy = "slug" | "sanitize";
@@ -33,6 +36,7 @@ interface RenameRule {
 
 interface FileTitleSyncSettings {
   enabled: boolean;
+  autoSyncWhileEditing: boolean;
   titleSource: TitleSource;
   excludedTags: string[];
   excludedFolders: string[];
@@ -50,6 +54,7 @@ const DEFAULT_RENAME_RULE: RenameRule = {
 
 const DEFAULT_SETTINGS: FileTitleSyncSettings = {
   enabled: true,
+  autoSyncWhileEditing: false,
   titleSource: "heading",
   excludedTags: [],
   excludedFolders: [],
@@ -190,6 +195,7 @@ export default class FileTitleSyncPlugin extends Plugin {
 
     if (
       !this.settings.enabled ||
+      !this.settings.autoSyncWhileEditing ||
       this.isGloballyExcludedFile(file) ||
       !this.isActiveFile(file)
     ) {
@@ -260,6 +266,7 @@ export default class FileTitleSyncPlugin extends Plugin {
     options: SyncFileOptions = { requireActiveFile: true },
   ): Promise<boolean> {
     const originalPath = file.path;
+    const folderNote = isFolderNote(file);
 
     if (
       !this.settings.enabled ||
@@ -297,6 +304,12 @@ export default class FileTitleSyncPlugin extends Plugin {
         });
       }
 
+      if (folderNote) {
+        await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+          frontmatter.tags = withRequiredTag(frontmatter.tags, FOLDER_NOTE_TAG);
+        });
+      }
+
       await this.ensureFrontmatterSpacing(file);
       await this.renameFileIfNeeded(file, renameTitle, options);
       return true;
@@ -309,7 +322,7 @@ export default class FileTitleSyncPlugin extends Plugin {
     return selectCanonicalTitle({
       primarySource: this.settings.titleSource,
       lines,
-      fileBasename: file.basename,
+      fileBasename: getTitleFileBaseName(file),
     });
   }
 
@@ -359,10 +372,29 @@ export default class FileTitleSyncPlugin extends Plugin {
     }
 
     const safeBaseName = buildFileBaseName(title, rule.strategy);
-    const targetPath = await this.getAvailablePath(file, safeBaseName);
+    const folderNote = isFolderNote(file);
 
-    if (targetPath !== file.path) {
-      await this.app.fileManager.renameFile(file, targetPath);
+    let renameTarget: TAbstractFile;
+    let targetPath: string;
+
+    if (folderNote) {
+      const folder = file.parent;
+
+      if (folder === null) {
+        return;
+      }
+
+      renameTarget = folder;
+      targetPath = await this.getAvailableFolderPath(folder, safeBaseName);
+    } else {
+      renameTarget = file;
+      targetPath = await this.getAvailableFilePath(file, safeBaseName);
+    }
+
+    const currentPath = normalizePath(renameTarget.path);
+
+    if (targetPath !== currentPath) {
+      await this.app.fileManager.renameFile(renameTarget, targetPath);
     }
   }
 
@@ -376,7 +408,7 @@ export default class FileTitleSyncPlugin extends Plugin {
     return null;
   }
 
-  private async getAvailablePath(
+  private async getAvailableFilePath(
     file: TFile,
     safeBaseName: string,
   ): Promise<string> {
@@ -394,6 +426,36 @@ export default class FileTitleSyncPlugin extends Plugin {
       const existingFile = this.app.vault.getAbstractFileByPath(candidatePath);
 
       if (candidatePath === currentPath || existingFile === null) {
+        return candidatePath;
+      }
+
+      suffix += 1;
+    }
+  }
+
+  private async getAvailableFolderPath(
+    folder: TFolder | null,
+    safeBaseName: string,
+  ): Promise<string> {
+    if (folder === null) {
+      return safeBaseName;
+    }
+
+    const parentFolderPath = folder.parent?.path ?? "";
+    const folderPrefix =
+      parentFolderPath === "/" || parentFolderPath === ""
+        ? ""
+        : `${parentFolderPath}/`;
+    const currentPath = normalizePath(folder.path);
+    let suffix = 0;
+
+    while (true) {
+      const candidateName = withSafeFileSuffix(safeBaseName, suffix);
+      const candidatePath = normalizePath(`${folderPrefix}${candidateName}`);
+      const existingFolder =
+        this.app.vault.getAbstractFileByPath(candidatePath);
+
+      if (candidatePath === currentPath || existingFolder === null) {
         return candidatePath;
       }
 
@@ -439,6 +501,20 @@ class FileTitleSyncSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.enabled)
           .onChange(async (value) => {
             this.plugin.settings.enabled = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Sync automatically while editing")
+      .setDesc(
+        "When enabled, the active note is synced after Obsidian modifies it while you edit. When disabled, sync runs only from the command palette.",
+      )
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.plugin.settings.autoSyncWhileEditing)
+          .onChange(async (value) => {
+            this.plugin.settings.autoSyncWhileEditing = value;
             await this.plugin.saveSettings();
           });
       });
@@ -816,6 +892,50 @@ export function selectRenameTitle({
   return canonicalTitle;
 }
 
+export function isFolderNote(file: Pick<TFile, "basename" | "parent">): boolean {
+  return (
+    file.basename === FOLDER_NOTE_BASENAME &&
+    file.parent !== null &&
+    file.parent.path.length > 0 &&
+    file.parent.path !== "/"
+  );
+}
+
+export function getTitleFileBaseName(file: Pick<TFile, "basename" | "parent">): string {
+  const parent = file.parent;
+
+  if (
+    file.basename !== FOLDER_NOTE_BASENAME ||
+    parent === null ||
+    parent.path.length === 0 ||
+    parent.path === "/"
+  ) {
+    return file.basename;
+  }
+
+  return parent.name;
+}
+
+export function getFolderNoteRenameTargetPath(
+  file: Pick<TFile, "basename" | "parent">,
+  safeBaseName: string,
+  suffix = 0,
+): string {
+  if (!isFolderNote(file) || file.parent === null) {
+    return safeBaseName;
+  }
+
+  const parentFolderPath = file.parent.parent?.path ?? "";
+  const folderPrefix =
+    parentFolderPath === "/" || parentFolderPath === ""
+      ? ""
+      : `${parentFolderPath}/`;
+
+  return normalizePath(
+    `${folderPrefix}${withSafeFileSuffix(safeBaseName, suffix)}`,
+  );
+}
+
 function normalizeTitle(title: string): string {
   const normalized = title.trim().replace(/\s+/g, " ");
   return normalized.length > 0 ? normalized : "Untitled";
@@ -1106,6 +1226,42 @@ function isInsideTagsList(lines: string[], lineIndex: number): boolean {
 
 function normalizeTag(tag: string): string {
   return tag.trim().replace(/^#/, "").toLowerCase();
+}
+
+function withRequiredTag(
+  currentTags: unknown,
+  requiredTag: string,
+): string[] | string {
+  const normalizedRequiredTag = normalizeTag(requiredTag);
+
+  if (Array.isArray(currentTags)) {
+    const nextTags = currentTags
+      .filter((tag): tag is string => typeof tag === "string")
+      .map((tag) => tag.trim())
+      .filter((tag) => tag.length > 0);
+
+    if (
+      nextTags.some((tag) => normalizeTag(tag) === normalizedRequiredTag)
+    ) {
+      return nextTags;
+    }
+
+    return [...nextTags, requiredTag];
+  }
+
+  if (typeof currentTags === "string") {
+    const nextTags = parseInlineFrontmatterTags(currentTags);
+
+    if (
+      nextTags.some((tag) => normalizeTag(tag) === normalizedRequiredTag)
+    ) {
+      return nextTags;
+    }
+
+    return [...nextTags, requiredTag];
+  }
+
+  return [requiredTag];
 }
 
 function normalizeFolderPath(value: string): string {

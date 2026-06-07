@@ -3,8 +3,12 @@ import assert from "node:assert/strict";
 
 import {
   buildFileBaseName,
+  getFolderNoteRenameTargetPath,
+  getTitleFileBaseName,
   isPathInExcludedFolders,
+  isFolderNote,
   readFrontmatterTitle,
+  selectCanonicalTitle,
   selectRenameTitle,
   splitLines,
 } from "../main";
@@ -78,6 +82,62 @@ describe("global excluded folders", () => {
         "/Projects/Drafts/",
       ]),
       false,
+    );
+  });
+});
+
+describe("folder notes", () => {
+  it("detects index.md files inside a named folder as folder notes", () => {
+    assert.equal(
+      isFolderNote({
+        basename: "index",
+        parent: { name: "Project Alpha", path: "Projects/Project Alpha" },
+      }),
+      true,
+    );
+    assert.equal(
+      isFolderNote({
+        basename: "Project Alpha",
+        parent: { name: "Projects", path: "Projects" },
+      }),
+      false,
+    );
+  });
+
+  it("uses the parent folder name as the filename title source for folder notes", () => {
+    const folderNote = {
+      basename: "index",
+      parent: { name: "Project Alpha", path: "Projects/Project Alpha" },
+    };
+
+    assert.equal(getTitleFileBaseName(folderNote), "Project Alpha");
+    assert.equal(
+      selectCanonicalTitle({
+        primarySource: "filename",
+        lines: splitLines(""),
+        fileBasename: getTitleFileBaseName(folderNote),
+      }),
+      "Project Alpha",
+    );
+  });
+
+  it("builds a parent folder rename target for matching folder notes", () => {
+    const folderNote = {
+      basename: "index",
+      parent: {
+        name: "Project Alpha",
+        path: "Projects/Project Alpha",
+        parent: { path: "Projects" },
+      },
+    };
+
+    assert.equal(
+      getFolderNoteRenameTargetPath(folderNote, "project-beta"),
+      "Projects/project-beta",
+    );
+    assert.equal(
+      getFolderNoteRenameTargetPath(folderNote, "project-beta", 2),
+      "Projects/project-beta-3",
     );
   });
 });

@@ -28,7 +28,7 @@ const context = await esbuild.context({
   ],
   format: "cjs",
   logLevel: "info",
-  outfile: "main.js",
+  outfile: "dist/main.js",
   platform: "browser",
   sourcemap: "inline",
   target: "es2022",

@@ -20,7 +20,6 @@ const INLINE_TAG_PATTERN = /(^|\s)#([A-Za-z0-9_/-]+)/g;
 const EDITOR_CHANGE_SYNC_DELAY_MS = 1_000;
 const MAX_ENCODED_FILE_BASENAME_LENGTH = 180;
 const FOLDER_NOTE_BASENAME = "index";
-const FOLDER_NOTE_TAG = "folder-note";
 
 type TitleSource = "heading" | "frontmatter" | "filename";
 type RenameStrategy = "slug" | "sanitize";
@@ -93,7 +92,7 @@ interface StoredFileTitleSyncSettings
 
 export default class FileTitleSyncPlugin extends Plugin {
   private readonly syncingPaths = new Set<string>();
-  private readonly pendingSyncTimers = new Map<string, number>();
+  private readonly recentlySyncedPaths = new Set<string>();
   settings: FileTitleSyncSettings = DEFAULT_SETTINGS;
 
   async onload(): Promise<void> {
@@ -115,17 +114,13 @@ export default class FileTitleSyncPlugin extends Plugin {
     });
 
     this.registerEvent(
-      this.app.vault.on("modify", (file) => {
-        this.scheduleSyncFile(file);
+      this.app.metadataCache.on("changed", (file) => {
+        void this.handleMetadataChanged(file);
       }),
     );
   }
 
   onunload(): void {
-    this.pendingSyncTimers.forEach((timerId) => {
-      window.clearTimeout(timerId);
-    });
-    this.pendingSyncTimers.clear();
   }
 
   async loadSettings(): Promise<void> {
@@ -188,7 +183,7 @@ export default class FileTitleSyncPlugin extends Plugin {
     );
   }
 
-  private scheduleSyncFile(file: TAbstractFile): void {
+  private async handleMetadataChanged(file: TAbstractFile): Promise<void> {
     if (!this.isMarkdownFile(file)) {
       return;
     }
@@ -197,22 +192,14 @@ export default class FileTitleSyncPlugin extends Plugin {
       !this.settings.enabled ||
       !this.settings.autoSyncWhileEditing ||
       this.isGloballyExcludedFile(file) ||
-      !this.isActiveFile(file)
+      !this.isActiveFile(file) ||
+      this.recentlySyncedPaths.has(file.path) ||
+      this.syncingPaths.has(file.path)
     ) {
       return;
     }
 
-    const existingTimerId = this.pendingSyncTimers.get(file.path);
-    if (existingTimerId !== undefined) {
-      window.clearTimeout(existingTimerId);
-    }
-
-    const timerId = window.setTimeout(() => {
-      this.pendingSyncTimers.delete(file.path);
-      void this.syncFile(file);
-    }, EDITOR_CHANGE_SYNC_DELAY_MS);
-
-    this.pendingSyncTimers.set(file.path, timerId);
+    await this.syncFile(file, { requireActiveFile: false });
   }
 
   private async resyncAllFiles(): Promise<void> {
@@ -266,7 +253,6 @@ export default class FileTitleSyncPlugin extends Plugin {
     options: SyncFileOptions = { requireActiveFile: true },
   ): Promise<boolean> {
     const originalPath = file.path;
-    const folderNote = isFolderNote(file);
 
     if (
       !this.settings.enabled ||
@@ -304,18 +290,20 @@ export default class FileTitleSyncPlugin extends Plugin {
         });
       }
 
-      if (folderNote) {
-        await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-          frontmatter.tags = withRequiredTag(frontmatter.tags, FOLDER_NOTE_TAG);
-        });
-      }
-
       await this.ensureFrontmatterSpacing(file);
       await this.renameFileIfNeeded(file, renameTitle, options);
+      this.markRecentlySynced(file.path);
       return true;
     } finally {
       this.syncingPaths.delete(originalPath);
     }
+  }
+
+  private markRecentlySynced(path: string): void {
+    this.recentlySyncedPaths.add(path);
+    window.setTimeout(() => {
+      this.recentlySyncedPaths.delete(path);
+    }, EDITOR_CHANGE_SYNC_DELAY_MS);
   }
 
   private getCanonicalTitle(file: TFile, lines: string[]): string {
@@ -1226,42 +1214,6 @@ function isInsideTagsList(lines: string[], lineIndex: number): boolean {
 
 function normalizeTag(tag: string): string {
   return tag.trim().replace(/^#/, "").toLowerCase();
-}
-
-function withRequiredTag(
-  currentTags: unknown,
-  requiredTag: string,
-): string[] | string {
-  const normalizedRequiredTag = normalizeTag(requiredTag);
-
-  if (Array.isArray(currentTags)) {
-    const nextTags = currentTags
-      .filter((tag): tag is string => typeof tag === "string")
-      .map((tag) => tag.trim())
-      .filter((tag) => tag.length > 0);
-
-    if (
-      nextTags.some((tag) => normalizeTag(tag) === normalizedRequiredTag)
-    ) {
-      return nextTags;
-    }
-
-    return [...nextTags, requiredTag];
-  }
-
-  if (typeof currentTags === "string") {
-    const nextTags = parseInlineFrontmatterTags(currentTags);
-
-    if (
-      nextTags.some((tag) => normalizeTag(tag) === normalizedRequiredTag)
-    ) {
-      return nextTags;
-    }
-
-    return [...nextTags, requiredTag];
-  }
-
-  return [requiredTag];
 }
 
 function normalizeFolderPath(value: string): string {

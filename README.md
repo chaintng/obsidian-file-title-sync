@@ -7,7 +7,9 @@ Syncs an Obsidian note title across:
 - the `title` frontmatter property
 - the `filename` frontmatter property for one-way filename renames
 
-Automatic sync is off by default. When enabled in settings, the sync runs from Obsidian's metadata cache change hook after the active Markdown file updates in Obsidian. Files modified outside Obsidian may not trigger the same automatic hook.
+Automatic sync is on by default and runs when you leave a note by switching notes or closing its tab. It does not run while typing or for external edits. Closing Obsidian itself is not a guaranteed sync trigger. Files and folder notes behave the same.
+
+Run **File Title Sync: Sync current file title** from the command palette (or assign a hotkey) to sync immediately without leaving the note. No confirmation dialog is shown.
 
 When a note has `filename` frontmatter, that metadata is used only for the file rename and takes priority over the synced title. The value still goes through the matching rename rule's slug or sanitize strategy before the file is renamed. The plugin does not write back to `filename`.
 
@@ -27,7 +29,7 @@ Run **File Title Sync: Resync all file titles** from Obsidian's command palette 
 ## Settings
 
 - **Enable title sync**: turn all heading, frontmatter, and filename syncing on or off.
-- **Sync automatically while editing**: when enabled, sync runs after Obsidian updates the active Markdown file's metadata cache. When disabled, sync runs only from the command palette.
+- **Sync automatically when leaving a note**: enabled by default, including upgrades from the retired while-editing setting. When disabled, sync runs only from the command palette.
 - **Source of truth**: choose which title source wins when values mismatch.
   - First H1 heading
   - Title frontmatter

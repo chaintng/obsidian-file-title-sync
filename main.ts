@@ -1,6 +1,7 @@
 import {
   App,
   Modal,
+  MarkdownView,
   Notice,
   normalizePath,
   Plugin,
@@ -17,7 +18,6 @@ const MULTIPLE_DASHES = /-{2,}/g;
 const EDGE_DASHES = /^-+|-+$/g;
 const H1_PATTERN = /^#(?!#)\s+(.+?)\s*#*\s*$/;
 const INLINE_TAG_PATTERN = /(^|\s)#([A-Za-z0-9_/-]+)/g;
-const EDITOR_CHANGE_SYNC_DELAY_MS = 1_000;
 const MAX_ENCODED_FILE_BASENAME_LENGTH = 180;
 const FOLDER_NOTE_BASENAME = "index";
 
@@ -35,7 +35,7 @@ interface RenameRule {
 
 interface FileTitleSyncSettings {
   enabled: boolean;
-  autoSyncWhileEditing: boolean;
+  autoSyncOnLeave: boolean;
   titleSource: TitleSource;
   excludedTags: string[];
   excludedFolders: string[];
@@ -53,7 +53,7 @@ const DEFAULT_RENAME_RULE: RenameRule = {
 
 const DEFAULT_SETTINGS: FileTitleSyncSettings = {
   enabled: true,
-  autoSyncWhileEditing: false,
+  autoSyncOnLeave: true,
   titleSource: "heading",
   excludedTags: [],
   excludedFolders: [],
@@ -92,7 +92,9 @@ interface StoredFileTitleSyncSettings
 
 export default class FileTitleSyncPlugin extends Plugin {
   private readonly syncingPaths = new Set<string>();
-  private readonly recentlySyncedPaths = new Set<string>();
+  private previousFile: TFile | null = null;
+  private previousView: MarkdownView | null = null;
+  private syncQueue: Promise<void> = Promise.resolve();
   settings: FileTitleSyncSettings = DEFAULT_SETTINGS;
 
   async onload(): Promise<void> {
@@ -113,23 +115,35 @@ export default class FileTitleSyncPlugin extends Plugin {
       },
     });
 
+    this.previousFile = this.app.workspace.getActiveFile();
+    this.previousView = this.app.workspace.getActiveViewOfType(MarkdownView);
     this.registerEvent(
-      this.app.metadataCache.on("changed", (file) => {
-        void this.handleMetadataChanged(file);
+      this.app.workspace.on("file-open", (file) => {
+        const previousFile = this.previousFile;
+        const previousView = this.previousView;
+        this.previousFile = file;
+        this.previousView = this.app.workspace.getActiveViewOfType(MarkdownView);
+        if (previousFile === file || !this.isMarkdownFile(previousFile)) return;
+        this.syncQueue = this.syncQueue.then(async () => {
+          if (previousView?.file === previousFile) await previousView.save();
+          await this.handleNoteLeft(previousFile);
+        }).catch((error) => {
+          console.error("File Title Sync: automatic sync failed", error);
+          new Notice("File Title Sync could not sync the previous note. Try Sync current file title.");
+        });
       }),
     );
-  }
-
-  onunload(): void {
   }
 
   async loadSettings(): Promise<void> {
     const storedSettings =
       (await this.loadData()) as Partial<StoredFileTitleSyncSettings> | null;
 
+    const { autoSyncWhileEditing: _legacy, ...currentSettings } =
+      (storedSettings ?? {}) as Partial<StoredFileTitleSyncSettings> & { autoSyncWhileEditing?: boolean };
     this.settings = {
       ...DEFAULT_SETTINGS,
-      ...storedSettings,
+      ...currentSettings,
       excludedTags: cleanList(
         storedSettings?.excludedTags ?? DEFAULT_SETTINGS.excludedTags,
       ).map(normalizeTag),
@@ -183,22 +197,13 @@ export default class FileTitleSyncPlugin extends Plugin {
     );
   }
 
-  private async handleMetadataChanged(file: TAbstractFile): Promise<void> {
-    if (!this.isMarkdownFile(file)) {
-      return;
-    }
-
+  private async handleNoteLeft(file: TFile): Promise<void> {
     if (
       !this.settings.enabled ||
-      !this.settings.autoSyncWhileEditing ||
-      this.isGloballyExcludedFile(file) ||
-      !this.isActiveFile(file) ||
-      this.recentlySyncedPaths.has(file.path) ||
-      this.syncingPaths.has(file.path)
-    ) {
-      return;
-    }
-
+      !this.settings.autoSyncOnLeave ||
+      this.isActiveFile(file) ||
+      this.app.vault.getAbstractFileByPath(file.path) !== file
+    ) return;
     await this.syncFile(file, { requireActiveFile: false });
   }
 
@@ -292,18 +297,10 @@ export default class FileTitleSyncPlugin extends Plugin {
 
       await this.ensureFrontmatterSpacing(file);
       await this.renameFileIfNeeded(file, renameTitle, options);
-      this.markRecentlySynced(file.path);
       return true;
     } finally {
       this.syncingPaths.delete(originalPath);
     }
-  }
-
-  private markRecentlySynced(path: string): void {
-    this.recentlySyncedPaths.add(path);
-    window.setTimeout(() => {
-      this.recentlySyncedPaths.delete(path);
-    }, EDITOR_CHANGE_SYNC_DELAY_MS);
   }
 
   private getCanonicalTitle(file: TFile, lines: string[]): string {
@@ -494,15 +491,15 @@ class FileTitleSyncSettingTab extends PluginSettingTab {
       });
 
     new Setting(containerEl)
-      .setName("Sync automatically while editing")
+      .setName("Sync automatically when leaving a note")
       .setDesc(
-        "When enabled, the active note is synced after Obsidian modifies it while you edit. When disabled, sync runs only from the command palette.",
+        "Sync the previous note when switching notes or closing its tab. Files and folder notes use the same rules. When disabled, use the command palette.",
       )
       .addToggle((toggle) => {
         toggle
-          .setValue(this.plugin.settings.autoSyncWhileEditing)
+          .setValue(this.plugin.settings.autoSyncOnLeave)
           .onChange(async (value) => {
-            this.plugin.settings.autoSyncWhileEditing = value;
+            this.plugin.settings.autoSyncOnLeave = value;
             await this.plugin.saveSettings();
           });
       });

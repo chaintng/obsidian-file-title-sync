@@ -141,3 +141,43 @@ describe("folder notes", () => {
     );
   });
 });
+
+
+describe("sync when leaving a note", () => {
+  it("registers only a file-open hook and syncs the note left, not the new note", async () => {
+    const { default: FileTitleSyncPlugin } = await import("../main");
+    const { TFile } = await import("obsidian");
+    const previous = Object.assign(new TFile(), { extension: "md", path: "old/index.md" });
+    const next = Object.assign(new TFile(), { extension: "md", path: "next.md" });
+    let active = previous;
+    let callback: (file: unknown) => void = () => {};
+    const synced: unknown[] = [];
+    const plugin = new FileTitleSyncPlugin() as any;
+    plugin.app = {
+      workspace: {
+        getActiveFile: () => active,
+        getActiveViewOfType: () => null,
+        on: (event: string, handler: typeof callback) => {
+          assert.equal(event, "file-open");
+          callback = handler;
+        },
+      },
+      vault: { getAbstractFileByPath: () => previous },
+    };
+    plugin.syncFile = async (file: unknown) => { synced.push(file); };
+    await plugin.onload();
+    callback(previous);
+    await plugin.syncQueue;
+    assert.deepEqual(synced, []);
+    active = next;
+    callback(next);
+    await plugin.syncQueue;
+    assert.deepEqual(synced, [previous]);
+    // Closing the last tab syncs the note just left, too.
+    plugin.app.vault.getAbstractFileByPath = () => next;
+    active = null as any;
+    callback(null);
+    await plugin.syncQueue;
+    assert.deepEqual(synced, [previous, next]);
+  });
+});

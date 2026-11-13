@@ -30,7 +30,8 @@ await esbuild.build({
           () => ({
             contents: `
               class Modal {}
-              class Plugin {}
+              class MarkdownView {}
+              class Plugin { async loadData() { return null; } addSettingTab() {} addCommand() {} registerEvent() {} }
               class PluginSettingTab {}
               class Setting {}
               class TAbstractFile {}
@@ -39,6 +40,7 @@ await esbuild.build({
               const Notice = class {};
               module.exports = {
                 Modal,
+                MarkdownView,
                 Notice,
                 Plugin,
                 PluginSettingTab,
